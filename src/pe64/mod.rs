@@ -400,6 +400,17 @@ impl PE64 {
         instruction.is_ip_rel_memory_operand() || instruction.is_jcc_short_or_near()
     }
 
+    fn is_bad_instruction(&self, instruction: &iced_x86::Instruction) -> bool {
+        (instruction.code() == Code::Add_rm8_r8
+            && instruction.memory_base() == Register::RAX
+            && instruction.op1_register() == Register::AL)
+            || instruction.is_invalid()
+            || instruction.code() == Code::Int3
+            || instruction.code() == Code::Nop_rm16
+            || instruction.code() == Code::Nop_rm32
+            || instruction.code() == Code::Nop_rm64
+    }
+
     pub fn get_translations(&self, assume_near: bool) -> Vec<Translation> {
         let mut translations: Vec<Translation> = Vec::new();
 
@@ -416,8 +427,25 @@ impl PE64 {
 
             let mut prev_obfuscated_lea: Option<usize> = None;
 
-            while decoder.can_decode() {                
+            while decoder.can_decode() {
+                let position = decoder.position();
                 let instruction = decoder.decode();
+
+                if instruction.code() == Code::Add_rm8_r8 && instruction.memory_base() == Register::RAX && instruction.op1_register() == Register::AL {
+                    let next_pos = section._raw[position..].iter().enumerate().find(|(_, byte)| **byte != 0).map(|(index, _)| position + index);
+                    
+                    if let Some(next_pos) = next_pos {
+                        decoder.set_ip(instruction.ip() + next_pos.saturating_sub(position) as u64);
+                        let _ = decoder.set_position(next_pos);
+                        continue;
+                    } else {
+                        break;
+                    }
+                }
+
+                if self.is_bad_instruction(&instruction) {
+                    continue;
+                }
 
                 // jump tables appear in this fashion in binaries compiled with llvm:
                 // lea
@@ -462,16 +490,7 @@ impl PE64 {
                     self.add_switch_translation(instruction, &mut translations).unwrap();
                 }
                 else {
-                    if (instruction.code() != Code::Add_rm8_r8
-                        || instruction.memory_base() != Register::RAX
-                        || instruction.op1_register() != Register::AL)
-                        && !instruction.is_invalid()
-                        && instruction.code() != Code::Int3
-                        && instruction.code() != Code::Nop_rm16
-                        && instruction.code() != Code::Nop_rm32
-                        && instruction.code() != Code::Nop_rm64 {
-                        translations.push(Translation::Default(DefaultTranslation::new(instruction)));
-                    }
+                    translations.push(Translation::Default(DefaultTranslation::new(instruction)));
                 }
 
                 //prev_instr.rotate_right(1);
