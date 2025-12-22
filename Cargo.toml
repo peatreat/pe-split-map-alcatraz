@@ -1,0 +1,11 @@
+[package]
+name = "pe-split-map-alcatraz"
+version = "0.1.2"
+edition = "2024"
+
+[dependencies]
+iced-x86 = { version = "1.21.0", features = ["code_asm"] }
+#pelite = "0.10.0"
+#winapi = { version = "0.3.9", features = ["winnt"] }
+rand = "0.9.2"
+thiserror = "2.0.17"
