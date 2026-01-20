@@ -18,6 +18,8 @@ pub enum PSMError {
     BadRelativeOffset(u64, u64, u64),
     #[error("Failed to translate RVA to mapped address: rva={0}")]
     TranslationFail(u64),
+    #[error("Expected jump instruction: rva={0}")]
+    ExpectedJump(u64),
     #[error("RVA Out of Bounds: rva={0}")]
     InvalidRVA(u64),
     #[error("RVA not found in sections: rva={0}")]

@@ -6,6 +6,7 @@ pub mod block;
 pub mod near;
 
 use iced_x86::{Decoder, Encoder, Instruction};
+use rand::RngCore;
 pub use relative::RelativeTranslation;
 pub use control::ControlTranslation;
 pub use jcc::JCCTranslation;
@@ -139,6 +140,21 @@ impl Translation {
                 decoder.set_ip(rva_to_find);
                 
                 let jmp_instr = decoder.decode();
+
+                if jmp_instr.mnemonic() == iced_x86::Mnemonic::Ret {
+                    let ret_translations = translations.iter()
+                        .filter(|translation| translation.instruction().mnemonic() == iced_x86::Mnemonic::Ret)
+                        .collect::<Vec<_>>();
+
+                    if ret_translations.is_empty() {
+                        return Err(PSMError::ExpectedJump(rva_to_find));
+                    }
+
+                    return Ok(ret_translations[rand::rng().next_u64() as usize % ret_translations.len()].mapped());
+                } else if jmp_instr.mnemonic() != iced_x86::Mnemonic::Jmp {
+                    return Err(PSMError::ExpectedJump(rva_to_find));
+                }
+
                 rva_to_find = jmp_instr.ip_rel_memory_address();
             }
         }
