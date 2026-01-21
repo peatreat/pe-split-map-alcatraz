@@ -1,7 +1,16 @@
-use iced_x86::{Decoder, code_asm::bl};
+use iced_x86::{code_asm::bl, Decoder};
 use rand::seq::SliceRandom;
 
-use crate::{psm_error::{PSMError, Result}, heap::{self, Heap}, pe64::{PE64, data_directory::{DllImport, ExportDirectory, ImportDirectory, RelocDirectory}, symbols::Symbol, translation::{Translation, block::TranslationBlock}}};
+use crate::{
+    heap::{self, Heap},
+    pe64::{
+        data_directory::{DllImport, ExportDirectory, ImportDirectory, RelocDirectory},
+        symbols::Symbol,
+        translation::{block::TranslationBlock, Translation},
+        PE64,
+    },
+    psm_error::{PSMError, Result},
+};
 
 pub struct Mapper;
 
@@ -22,7 +31,10 @@ pub enum TranslationBlockSize {
 }
 
 impl Mapper {
-    pub fn find_symbol_by_rva(symbols: &[(std::ops::Range<usize>, MappedBlock)], rva: usize) -> Option<&(std::ops::Range<usize>, MappedBlock)> {
+    pub fn find_symbol_by_rva(
+        symbols: &[(std::ops::Range<usize>, MappedBlock)],
+        rva: usize,
+    ) -> Option<&(std::ops::Range<usize>, MappedBlock)> {
         let mut first = 0isize;
         let mut last = symbols.len() as isize - 1;
 
@@ -41,7 +53,10 @@ impl Mapper {
 
         None
     }
-    pub fn find_symbol_by_rva_mut(symbols: &mut [(std::ops::Range<usize>, MappedBlock)], rva: usize) -> Option<&mut (std::ops::Range<usize>, MappedBlock)> {
+    pub fn find_symbol_by_rva_mut(
+        symbols: &mut [(std::ops::Range<usize>, MappedBlock)],
+        rva: usize,
+    ) -> Option<&mut (std::ops::Range<usize>, MappedBlock)> {
         let mut first = 0isize;
         let mut last = symbols.len() as isize - 1;
 
@@ -60,12 +75,22 @@ impl Mapper {
         None
     }
 
-    fn map_symbols(pe: &PE64, heap: &mut Heap, symbols: &[(usize, Symbol)]) -> Result<Vec<(std::ops::Range<usize>, MappedBlock)>> {
+    fn map_symbols(
+        pe: &PE64,
+        heap: &mut Heap,
+        symbols: &[(usize, Symbol)],
+    ) -> Result<Vec<(std::ops::Range<usize>, MappedBlock)>> {
         // filter out ignored symbols
-        let mut symbols = symbols.iter()
-        .filter(|(rva, symbol)| !symbol.should_ignore && symbol.max_operation_size > 0)
-        .map(|(rva, symbol)| (*rva..(*rva + symbol.max_operation_size as usize), MappedBlock::default()))
-        .collect::<Vec<_>>();
+        let mut symbols = symbols
+            .iter()
+            .filter(|(rva, symbol)| !symbol.should_ignore && symbol.max_operation_size > 0)
+            .map(|(rva, symbol)| {
+                (
+                    *rva..(*rva + symbol.max_operation_size as usize),
+                    MappedBlock::default(),
+                )
+            })
+            .collect::<Vec<_>>();
 
         // allocate in random order
         let mut symbols_shuffled = symbols.iter_mut().collect::<Vec<_>>();
@@ -75,17 +100,31 @@ impl Mapper {
         for (rva_range, mapped_block) in &mut symbols_shuffled {
             let symbol_size = (rva_range.end - rva_range.start) as usize;
 
-            mapped_block.address = heap.reserve_with_same_alignment(rva_range.start as u64, (rva_range.end - rva_range.start) as u64, 32)?;
+            mapped_block.address = heap.reserve_with_same_alignment(
+                rva_range.start as u64,
+                (rva_range.end - rva_range.start) as u64,
+                32,
+            )?;
 
-            mapped_block.data = pe.get_data_from_rva(rva_range.start, symbol_size)
-            .and_then(|slice| Ok(slice.to_vec()))
-            .unwrap_or(vec![0u8; symbol_size]);
+            mapped_block.data = pe
+                .get_data_from_rva(rva_range.start, symbol_size)
+                .and_then(|slice| Ok(slice.to_vec()))
+                .unwrap_or(vec![0u8; symbol_size]);
         }
 
         Ok(symbols)
     }
 
-    pub fn map(pe: &PE64, dll_imports: &[DllImport], code_heap: &mut Heap, symbol_heap: &mut Heap, translations: &mut [Translation], symbols: &[(usize, Symbol)], block_size: TranslationBlockSize, assume_jumps_are_near: bool) -> Result<Mapped> {
+    pub fn map(
+        pe: &PE64,
+        dll_imports: &[DllImport],
+        code_heap: &mut Heap,
+        symbol_heap: &mut Heap,
+        translations: &mut [Translation],
+        symbols: &[(usize, Symbol)],
+        block_size: TranslationBlockSize,
+        assume_jumps_are_near: bool,
+    ) -> Result<Mapped> {
         // map symbols
         let mut symbols = Mapper::map_symbols(pe, symbol_heap, symbols)?;
 
@@ -139,11 +178,19 @@ impl Mapper {
 
                     relocated_rva = relocated_rva.wrapping_sub(pe.nt64().OptionalHeader.ImageBase);
 
-                    let relocated_symbol_address = Translation::translate_rva_to_mapped(&pe, &translations, &symbols, relocated_rva)?;
+                    let relocated_symbol_address = Translation::translate_rva_to_mapped(
+                        &pe,
+                        &translations,
+                        &symbols,
+                        relocated_rva,
+                    )?;
 
-                    if let Some((rva_range, symbol)) = Mapper::find_symbol_by_rva_mut(&mut symbols, reloc_symbol.rva) {
+                    if let Some((rva_range, symbol)) =
+                        Mapper::find_symbol_by_rva_mut(&mut symbols, reloc_symbol.rva)
+                    {
                         let symbol_offset = reloc_symbol.rva - rva_range.start;
-                        symbol.data[symbol_offset..(symbol_offset + 8)].copy_from_slice(&relocated_symbol_address.to_le_bytes());
+                        symbol.data[symbol_offset..(symbol_offset + 8)]
+                            .copy_from_slice(&relocated_symbol_address.to_le_bytes());
                     }
                 }
             }
@@ -152,35 +199,71 @@ impl Mapper {
         // resolve imports
         if let Some(imports) = ImportDirectory::get_imports(pe)? {
             for import_dir in imports.directories {
-                if let Some(dll_name) = import_dir.dll_name_rva_and_size
+                if let Some(dll_name) = import_dir
+                    .dll_name_rva_and_size
                     .and_then(|(name_rva, size)| pe.get_data_from_rva(name_rva, size).ok())
-                    .and_then(|dll_name_slice| String::from_utf8(dll_name_slice[..dll_name_slice.len() - 1].to_vec()).ok())
-                { 
+                    .and_then(|dll_name_slice| {
+                        String::from_utf8(dll_name_slice[..dll_name_slice.len() - 1].to_vec()).ok()
+                    })
+                {
                     println!("dll: {}", dll_name);
 
-                    let dll_import = dll_imports.iter().find(|dll_import| dll_import.name.eq_ignore_ascii_case(&dll_name)).ok_or(PSMError::ImportDLLNotFound(dll_name.to_owned()))?;
+                    let dll_import = dll_imports
+                        .iter()
+                        .find(|dll_import| dll_import.name.eq_ignore_ascii_case(&dll_name))
+                        .ok_or(PSMError::ImportDLLNotFound(dll_name.to_owned()))?;
 
-                    let exports = ExportDirectory::get_export_directory(&PE64::new(&dll_import.path, false)?)?.ok_or(PSMError::ImportHasNoExports(dll_name.to_owned()))?;
+                    let exports = ExportDirectory::get_export_directory(&PE64::new(
+                        &dll_import.path,
+                        false,
+                        false,
+                    )?)?
+                    .ok_or(PSMError::ImportHasNoExports(dll_name.to_owned()))?;
 
                     for thunk in import_dir.thunks {
-                        let export_offset = if let Some(import_name) = thunk.name_rva_and_size
-                                .and_then(|(name_rva, size)| pe.get_data_from_rva(name_rva + std::mem::size_of::<u16>(), size - std::mem::size_of::<u16>()).ok())
-                                .and_then(|import_name_slice| String::from_utf8(import_name_slice[..import_name_slice.len() - 1].to_vec()).ok())
-                            {
-                                exports.get_export_offset_from_name(&import_name)
-                                    .ok_or(PSMError::ImportNotFound(dll_name.to_owned(), None, Some(import_name)))
-                            } else if let Some(ordinal) = thunk.ordinal {
-                                exports.get_export_offset_from_ordinal(ordinal)
-                                    .ok_or(PSMError::ImportNotFound(dll_name.to_owned(), Some(ordinal), None))
-                            } else {
-                                Err(PSMError::BadImportFunctionName(dll_name.to_owned(), thunk.name_rva_and_size.and_then(|(name_rva, _)| Some(name_rva))))
-                            }?;
+                        let export_offset = if let Some(import_name) = thunk
+                            .name_rva_and_size
+                            .and_then(|(name_rva, size)| {
+                                pe.get_data_from_rva(
+                                    name_rva + std::mem::size_of::<u16>(),
+                                    size - std::mem::size_of::<u16>(),
+                                )
+                                .ok()
+                            })
+                            .and_then(|import_name_slice| {
+                                String::from_utf8(
+                                    import_name_slice[..import_name_slice.len() - 1].to_vec(),
+                                )
+                                .ok()
+                            }) {
+                            exports.get_export_offset_from_name(&import_name).ok_or(
+                                PSMError::ImportNotFound(
+                                    dll_name.to_owned(),
+                                    None,
+                                    Some(import_name),
+                                ),
+                            )
+                        } else if let Some(ordinal) = thunk.ordinal {
+                            exports.get_export_offset_from_ordinal(ordinal).ok_or(
+                                PSMError::ImportNotFound(dll_name.to_owned(), Some(ordinal), None),
+                            )
+                        } else {
+                            Err(PSMError::BadImportFunctionName(
+                                dll_name.to_owned(),
+                                thunk
+                                    .name_rva_and_size
+                                    .and_then(|(name_rva, _)| Some(name_rva)),
+                            ))
+                        }?;
 
                         let import_address = dll_import.base + export_offset as usize;
 
-                        if let Some((rva_range, symbol)) = Mapper::find_symbol_by_rva_mut(&mut symbols, thunk.rva_of_data) {
+                        if let Some((rva_range, symbol)) =
+                            Mapper::find_symbol_by_rva_mut(&mut symbols, thunk.rva_of_data)
+                        {
                             let symbol_offset = thunk.rva_of_data - rva_range.start;
-                            symbol.data[symbol_offset..(symbol_offset + 8)].copy_from_slice(&import_address.to_le_bytes());
+                            symbol.data[symbol_offset..(symbol_offset + 8)]
+                                .copy_from_slice(&import_address.to_le_bytes());
                         }
                     }
                 }
@@ -188,7 +271,12 @@ impl Mapper {
         }
 
         // get entrypoint address
-        let entrypoint = Translation::translate_rva_to_mapped(&pe, translations, &symbols, pe.nt64().OptionalHeader.AddressOfEntryPoint as u64)?;
+        let entrypoint = Translation::translate_rva_to_mapped(
+            &pe,
+            translations,
+            &symbols,
+            pe.nt64().OptionalHeader.AddressOfEntryPoint as u64,
+        )?;
 
         // create mapped blocks
         let mut mapped_blocks: Vec<MappedBlock> = Vec::new();
@@ -202,16 +290,19 @@ impl Mapper {
 
         mapped_blocks.reserve(symbols.len());
 
-        mapped_blocks.append(&mut symbols.into_iter().map(|(_, mapped_block)| mapped_block).collect());
+        mapped_blocks.append(
+            &mut symbols
+                .into_iter()
+                .map(|(_, mapped_block)| mapped_block)
+                .collect(),
+        );
 
         // shuffle to mix up the order of writes being transmitted
         mapped_blocks.shuffle(&mut rng);
 
-        Ok (
-            Mapped {
-                entrypoint,
-                blocks: mapped_blocks,
-            }
-        )
+        Ok(Mapped {
+            entrypoint,
+            blocks: mapped_blocks,
+        })
     }
 }

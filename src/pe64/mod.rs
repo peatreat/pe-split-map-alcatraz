@@ -1,41 +1,69 @@
 use core::panic;
-use std::{f32::consts::E, fs, io, mem::{self, offset_of}};
+use std::{
+    f32::consts::E,
+    fs, io,
+    mem::{self, offset_of},
+};
 
-use iced_x86::{Code, Decoder, Encoder, Instruction, code_asm::AsmRegister64};
+use iced_x86::{code_asm::AsmRegister64, Code, Decoder, Encoder, Instruction};
 
-use crate::{psm_error::PSMError, pe64::{headers::{IMAGE_DOS_HEADER, IMAGE_NT_HEADERS64, IMAGE_NT_OPTIONAL_HDR64_MAGIC, IMAGE_SECTION_HEADER}, section::Section, translation::{ControlTranslation, DefaultTranslation, JCCTranslation, RelativeTranslation, Translation, near::NearTranslation}}};
+use crate::{
+    pe64::{
+        headers::{
+            IMAGE_DOS_HEADER, IMAGE_NT_HEADERS64, IMAGE_NT_OPTIONAL_HDR64_MAGIC,
+            IMAGE_SECTION_HEADER,
+        },
+        section::Section,
+        translation::{
+            near::NearTranslation, ControlTranslation, DefaultTranslation, JCCTranslation,
+            RelativeTranslation, Translation,
+        },
+    },
+    psm_error::PSMError,
+    translation::EmbedTranslation,
+};
 
-mod headers;
-pub mod symbols;
-mod section;
 pub mod data_directory;
-pub mod translation;
+mod headers;
 pub mod mapper;
+mod section;
+pub mod symbols;
+pub mod translation;
 
 use iced_x86::*;
 
 pub struct PE64 {
     _raw: Vec<u8>,
     obfuscated: bool,
+    embed_instructions: bool,
 }
 
 impl PE64 {
-    pub fn new(path: &str, obfuscated: bool) -> Result<Self, PSMError> {
+    pub fn new(path: &str, obfuscated: bool, embed_instructions: bool) -> Result<Self, PSMError> {
         let bytes = fs::read(path)?;
-        
-        PE64::new_from_bytes(bytes, obfuscated)
+
+        PE64::new_from_bytes(bytes, obfuscated, embed_instructions)
     }
 
-    pub fn new_from_bytes(bytes: Vec<u8>, obfuscated: bool) -> Result<Self, PSMError> {
+    pub fn new_from_bytes(
+        bytes: Vec<u8>,
+        obfuscated: bool,
+        embed_instructions: bool,
+    ) -> Result<Self, PSMError> {
         // check if valid pe by checking e_magic in DOS header
-        if bytes.len() < mem::size_of::<IMAGE_DOS_HEADER>() || bytes[0] != 0x4D || bytes[1] != 0x5A {
+        if bytes.len() < mem::size_of::<IMAGE_DOS_HEADER>() || bytes[0] != 0x4D || bytes[1] != 0x5A
+        {
             return Err(PSMError::IOError(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "File is not a valid PE",
             )));
         }
 
-        let pe = PE64 { _raw: bytes, obfuscated };
+        let pe = PE64 {
+            _raw: bytes,
+            obfuscated,
+            embed_instructions,
+        };
 
         // check if 64-bit
         if !pe.is_64() {
@@ -59,7 +87,9 @@ impl PE64 {
 
     pub fn nt64<'a>(&self) -> &'a IMAGE_NT_HEADERS64 {
         // parse nt 64-bit
-        unsafe { &*(self._raw.as_ptr().add(self.dos().e_lfanew as usize) as *const IMAGE_NT_HEADERS64) }
+        unsafe {
+            &*(self._raw.as_ptr().add(self.dos().e_lfanew as usize) as *const IMAGE_NT_HEADERS64)
+        }
     }
 
     fn is_64(&self) -> bool {
@@ -74,7 +104,8 @@ impl PE64 {
         self.iter_find_section(|section| section.contains_rva(rva))
             .map(|section| {
                 let offset_within_section = rva - section.virtual_address;
-                let section_raw_offset = section._raw.as_ptr() as usize - self._raw.as_ptr() as usize;
+                let section_raw_offset =
+                    section._raw.as_ptr() as usize - self._raw.as_ptr() as usize;
                 section_raw_offset + offset_within_section
             })
             .ok_or(PSMError::RVANotFound(rva as u64))
@@ -91,25 +122,31 @@ impl PE64 {
     }
 
     pub fn get_data_from_rva(&self, rva: usize, size: usize) -> Result<&[u8], PSMError> {
-        let offset = self.iter_find_section(|section| section.contains_rva(rva) && rva + size <= section.virtual_address + section._raw.len())
+        let offset = self
+            .iter_find_section(|section| {
+                section.contains_rva(rva)
+                    && rva + size <= section.virtual_address + section._raw.len()
+            })
             .map(|section| {
                 let offset_within_section = rva - section.virtual_address;
-                let section_raw_offset = section._raw.as_ptr() as usize - self._raw.as_ptr() as usize;
+                let section_raw_offset =
+                    section._raw.as_ptr() as usize - self._raw.as_ptr() as usize;
                 section_raw_offset + offset_within_section
             })
             .ok_or(PSMError::RVANotFound(rva as u64))?;
 
-        Ok(&self._raw[offset..offset+size])
+        Ok(&self._raw[offset..offset + size])
     }
 
-    
     pub fn get_string_size(&self, rva: usize) -> Result<usize, PSMError> {
         let mut offset = self.rva_to_offset(rva)?;
 
         let mut size = 1; // start with 1 to account for null terminator
-        
+
         while offset < self._raw.len() {
-            let byte = self._raw.get(offset)
+            let byte = self
+                ._raw
+                .get(offset)
                 .ok_or(PSMError::InvalidRVA(rva as u64 + offset as u64))?;
 
             if *byte == 0 {
@@ -124,14 +161,15 @@ impl PE64 {
     }
 
     pub fn iter_find_section<F>(&self, mut closure: F) -> Option<Section<'_>>
-        where F: FnMut(&Section) -> bool,
+    where
+        F: FnMut(&Section) -> bool,
     {
         let number_of_sections = self.nt64().FileHeader.NumberOfSections;
 
         let first_section_offset = self.dos().e_lfanew as usize
             + offset_of!(IMAGE_NT_HEADERS64, OptionalHeader) as usize
             + self.nt64().FileHeader.SizeOfOptionalHeader as usize;
-        
+
         let section_size = mem::size_of::<IMAGE_SECTION_HEADER>();
 
         for i in 0..number_of_sections {
@@ -151,7 +189,24 @@ impl PE64 {
     }
 
     fn get_unused_gpr64(&self, instruction: &iced_x86::Instruction) -> Option<iced_x86::Register> {
-        let mut unused = [Register::RAX, Register::RCX, Register::RDX, Register::RBX, Register::RSP, Register::RBP, Register::RSI, Register::RDI, Register::R8, Register::R9, Register::R10, Register::R11, Register::R12, Register::R13, Register::R14, Register::R15];
+        let mut unused = [
+            Register::RAX,
+            Register::RCX,
+            Register::RDX,
+            Register::RBX,
+            Register::RSP,
+            Register::RBP,
+            Register::RSI,
+            Register::RDI,
+            Register::R8,
+            Register::R9,
+            Register::R10,
+            Register::R11,
+            Register::R12,
+            Register::R13,
+            Register::R14,
+            Register::R15,
+        ];
 
         for i in 0..instruction.op_count() {
             if instruction.op_kind(i) == OpKind::Register {
@@ -167,7 +222,11 @@ impl PE64 {
         unused.iter().find(|reg| **reg != Register::None).copied()
     }
 
-    fn find_code_for_operands(&self, mnemonic: &iced_x86::Mnemonic, operands: &[OpCodeOperandKind]) -> Option<Code> {
+    fn find_code_for_operands(
+        &self,
+        mnemonic: &iced_x86::Mnemonic,
+        operands: &[OpCodeOperandKind],
+    ) -> Option<Code> {
         for code in Code::values() {
             let op_kinds = code.op_code().op_kinds();
 
@@ -181,6 +240,20 @@ impl PE64 {
         }
 
         None
+    }
+
+    fn add_default_translation(
+        &self,
+        instruction: iced_x86::Instruction,
+        translations: &mut Vec<Translation>,
+    ) -> Result<(), iced_x86::IcedError> {
+        if self.embed_instructions && instruction.len() <= 8 {
+            translations.push(Translation::Embed(EmbedTranslation::new(instruction)));
+        } else {
+            translations.push(Translation::Default(DefaultTranslation::new(instruction)));
+        }
+
+        Ok(())
     }
 
     /*
@@ -197,7 +270,13 @@ impl PE64 {
     block batching can either be None, NumberOfInstructions, or TotalSizeOfInstructions
     */
 
-    fn add_relative_translation(&self, mut instruction: iced_x86::Instruction, translations: &mut Vec<Translation>, assume_near: bool, prev_obfuscated_lea: &mut Option<usize>) -> Result<(), iced_x86::IcedError> {        
+    fn add_relative_translation(
+        &self,
+        mut instruction: iced_x86::Instruction,
+        translations: &mut Vec<Translation>,
+        assume_near: bool,
+        prev_obfuscated_lea: &mut Option<usize>,
+    ) -> Result<(), iced_x86::IcedError> {
         match instruction.mnemonic() {
             iced_x86::Mnemonic::Lea => {
                 if self.obfuscated {
@@ -214,7 +293,7 @@ impl PE64 {
                 instruction.set_immediate64(instruction.ip_rel_memory_address());
 
                 translations.push(Translation::Relative(RelativeTranslation::new(instruction)));
-            },
+            }
             iced_x86::Mnemonic::Jmp | iced_x86::Mnemonic::Call => {
                 if assume_near {
                     translations.push(Translation::Near(NearTranslation::new(instruction)));
@@ -222,31 +301,63 @@ impl PE64 {
                 }
 
                 //println!(" {:X} jmp kind: {:?}, instr: {}", instruction.ip(), instruction.op0_kind(), instruction);
-                let mut mov_instruction = Instruction::with2(Code::Mov_r64_imm64, Register::R11, instruction.ip_rel_memory_address())?;
+                let mut mov_instruction = Instruction::with2(
+                    Code::Mov_r64_imm64,
+                    Register::R11,
+                    instruction.ip_rel_memory_address(),
+                )?;
                 mov_instruction.set_ip(instruction.ip());
 
-                let mnemonic = if instruction.mnemonic() == iced_x86::Mnemonic::Jmp { Code::Jmp_rm64 } else { Code::Call_rm64 };
+                let mnemonic = if instruction.mnemonic() == iced_x86::Mnemonic::Jmp {
+                    Code::Jmp_rm64
+                } else {
+                    Code::Call_rm64
+                };
 
                 let mut control_instruction = if instruction.op0_kind() == OpKind::NearBranch64 {
-                    Instruction::with1(mnemonic, 
-                    Register::R11
-                    )?
-                }
-                else {
-                    Instruction::with1(mnemonic, 
-                    MemoryOperand::new(Register::R11, Register::None, 1, 0, 0, false, Register::None)
+                    Instruction::with1(mnemonic, Register::R11)?
+                } else {
+                    Instruction::with1(
+                        mnemonic,
+                        MemoryOperand::new(
+                            Register::R11,
+                            Register::None,
+                            1,
+                            0,
+                            0,
+                            false,
+                            Register::None,
+                        ),
                     )?
                 };
 
                 control_instruction.set_ip(instruction.ip());
 
-                translations.push(Translation::Control(ControlTranslation::new(mov_instruction, control_instruction)));
-            },
-            iced_x86::Mnemonic::Jb | iced_x86::Mnemonic::Jbe | iced_x86::Mnemonic::Jcxz | iced_x86::Mnemonic::Jecxz
-            | iced_x86::Mnemonic::Jknzd | iced_x86::Mnemonic::Jkzd | iced_x86::Mnemonic::Jl | iced_x86::Mnemonic::Jle
-            | iced_x86::Mnemonic::Jae | iced_x86::Mnemonic::Ja | iced_x86::Mnemonic::Jge | iced_x86::Mnemonic::Jg
-            | iced_x86::Mnemonic::Jno | iced_x86::Mnemonic::Jnp | iced_x86::Mnemonic::Jns | iced_x86::Mnemonic::Jo
-            | iced_x86::Mnemonic::Jp | iced_x86::Mnemonic::Js | iced_x86::Mnemonic::Je | iced_x86::Mnemonic::Jne => {
+                translations.push(Translation::Control(ControlTranslation::new(
+                    mov_instruction,
+                    control_instruction,
+                )));
+            }
+            iced_x86::Mnemonic::Jb
+            | iced_x86::Mnemonic::Jbe
+            | iced_x86::Mnemonic::Jcxz
+            | iced_x86::Mnemonic::Jecxz
+            | iced_x86::Mnemonic::Jknzd
+            | iced_x86::Mnemonic::Jkzd
+            | iced_x86::Mnemonic::Jl
+            | iced_x86::Mnemonic::Jle
+            | iced_x86::Mnemonic::Jae
+            | iced_x86::Mnemonic::Ja
+            | iced_x86::Mnemonic::Jge
+            | iced_x86::Mnemonic::Jg
+            | iced_x86::Mnemonic::Jno
+            | iced_x86::Mnemonic::Jnp
+            | iced_x86::Mnemonic::Jns
+            | iced_x86::Mnemonic::Jo
+            | iced_x86::Mnemonic::Jp
+            | iced_x86::Mnemonic::Js
+            | iced_x86::Mnemonic::Je
+            | iced_x86::Mnemonic::Jne => {
                 // right now the big problem here is we are creating new instructions that have branches to other new instructions and those new instructions don't have a proper IP
                 // we should make a new translation type that holds these branches to these new instructions and when resolving we can set the proper IPs for them
                 //let target = instruction.near_branch64();
@@ -265,7 +376,7 @@ impl PE64 {
 
                 //panic!();
                 //println!("short branch after: {}, kind: {:?}", instruction, instruction.op0_kind());
-            },
+            }
             _ => {
                 if assume_near {
                     translations.push(Translation::Near(NearTranslation::new(instruction)));
@@ -275,16 +386,24 @@ impl PE64 {
                 let unused_gpr64 = self.get_unused_gpr64(&instruction).unwrap();
 
                 let mut push_instruction = Instruction::with1(Code::Push_r64, unused_gpr64)?;
-                let mut mov_instruction = Instruction::with2(Code::Mov_r64_imm64, unused_gpr64, instruction.ip_rel_memory_address())?;
+                let mut mov_instruction = Instruction::with2(
+                    Code::Mov_r64_imm64,
+                    unused_gpr64,
+                    instruction.ip_rel_memory_address(),
+                )?;
                 let mut pop_instruction = Instruction::with1(Code::Pop_r64, unused_gpr64)?;
 
                 push_instruction.set_ip(instruction.ip());
                 mov_instruction.set_ip(instruction.ip());
                 pop_instruction.set_ip(instruction.ip());
 
-                translations.push(Translation::Default(DefaultTranslation::new(push_instruction)));
+                translations.push(Translation::Default(DefaultTranslation::new(
+                    push_instruction,
+                )));
 
-                translations.push(Translation::Relative(RelativeTranslation::new(mov_instruction)));
+                translations.push(Translation::Relative(RelativeTranslation::new(
+                    mov_instruction,
+                )));
 
                 //println!("old instr: {}", instruction);
 
@@ -296,8 +415,10 @@ impl PE64 {
 
                 translations.push(Translation::Default(DefaultTranslation::new(instruction)));
 
-                translations.push(Translation::Default(DefaultTranslation::new(pop_instruction)));
-                
+                translations.push(Translation::Default(DefaultTranslation::new(
+                    pop_instruction,
+                )));
+
                 /*for i in (translations.len() - 4)..translations.len() {
                     let encoded = translations[i].buffer()?;
                     let mut decoder = Decoder::new(64, &encoded, iced_x86::DecoderOptions::NONE);
@@ -309,13 +430,17 @@ impl PE64 {
                 }
 
                 panic!();*/
-            },
+            }
         };
 
         Ok(())
     }
 
-    fn add_switch_translation(&self, mut instruction: iced_x86::Instruction, translations: &mut Vec<Translation>) -> Result<(), iced_x86::IcedError> {
+    fn add_switch_translation(
+        &self,
+        mut instruction: iced_x86::Instruction,
+        translations: &mut Vec<Translation>,
+    ) -> Result<(), iced_x86::IcedError> {
         if instruction.op_count() != 1 {
             panic!("unexpected number of operands");
         }
@@ -331,7 +456,8 @@ impl PE64 {
                 for (i, translation) in translations.iter().enumerate().rev() {
                     if translation.instruction().op_count() != 2
                         || translation.instruction().op0_kind() != OpKind::Register
-                        || translation.instruction().op0_register() != instruction.op0_register() {
+                        || translation.instruction().op0_register() != instruction.op0_register()
+                    {
                         continue;
                     }
 
@@ -349,21 +475,24 @@ impl PE64 {
                     // from here on out we can assume we are in a jump table
 
                     let index_register = translation.instruction().op1_register();
-                    let movsxd = translations[i-1].instruction();
+                    let movsxd = translations[i - 1].instruction();
 
                     if movsxd.mnemonic() != Mnemonic::Movsxd {
-                        panic!("unexpected instruction that uses jmp's register at {:p}", translation.instruction().ip() as *const usize);
+                        panic!(
+                            "unexpected instruction that uses jmp's register at {:p}",
+                            translation.instruction().ip() as *const usize
+                        );
                     }
 
                     println!("{:?}", movsxd.memory_index());
 
                     //let mut mov_instruction = Instruction::with2(Code::Mov_r64_imm64, index_register, instruction.near_branch64())?;
                     //mov_instruction.set_ip(instruction.ip());
-//
+                    //
                     //let mut control_instruction = Instruction::with1(Code::Jmp_rm64, index_register)?;
-//
+                    //
                     //control_instruction.set_ip(instruction.ip());
-//
+                    //
                     //translations.push(Box::new(translation::ControlTranslation {
                     //    mov_instruction,
                     //    control_instruction,
@@ -375,24 +504,36 @@ impl PE64 {
                 translations.push(Translation::Default(DefaultTranslation::new(instruction)));
 
                 Ok(())
-            },
+            }
             OpKind::NearBranch64 => {
-                if self.iter_find_section(|section| section.contains_rva(instruction.near_branch64() as usize)).is_none() {
+                if self
+                    .iter_find_section(|section| {
+                        section.contains_rva(instruction.near_branch64() as usize)
+                    })
+                    .is_none()
+                {
                     panic!("bad near branch");
                 }
 
-                let mut mov_instruction = Instruction::with2(Code::Mov_r64_imm64, Register::R11, instruction.near_branch64())?;
+                let mut mov_instruction = Instruction::with2(
+                    Code::Mov_r64_imm64,
+                    Register::R11,
+                    instruction.near_branch64(),
+                )?;
                 mov_instruction.set_ip(instruction.ip());
 
                 let mut control_instruction = Instruction::with1(Code::Jmp_rm64, Register::R11)?;
 
                 control_instruction.set_ip(instruction.ip());
 
-                translations.push(Translation::Control(ControlTranslation::new(mov_instruction, control_instruction)));
+                translations.push(Translation::Control(ControlTranslation::new(
+                    mov_instruction,
+                    control_instruction,
+                )));
 
                 Ok(())
-            },
-            _ => panic!("unsupported jmp instruction")
+            }
+            _ => panic!("unsupported jmp instruction"),
         }
     }
 
@@ -431,9 +572,16 @@ impl PE64 {
                 let position = decoder.position();
                 let instruction = decoder.decode();
 
-                if instruction.code() == Code::Add_rm8_r8 && instruction.memory_base() == Register::RAX && instruction.op1_register() == Register::AL {
-                    let next_pos = section._raw[position..].iter().enumerate().find(|(_, byte)| **byte != 0).map(|(index, _)| position + index);
-                    
+                if instruction.code() == Code::Add_rm8_r8
+                    && instruction.memory_base() == Register::RAX
+                    && instruction.op1_register() == Register::AL
+                {
+                    let next_pos = section._raw[position..]
+                        .iter()
+                        .enumerate()
+                        .find(|(_, byte)| **byte != 0)
+                        .map(|(index, _)| position + index);
+
                     if let Some(next_pos) = next_pos {
                         decoder.set_ip(instruction.ip() + next_pos.saturating_sub(position) as u64);
                         let _ = decoder.set_position(next_pos);
@@ -483,14 +631,22 @@ impl PE64 {
                     }
                 }
 
-                if self.is_rel_instruction(&instruction) || instruction.op0_kind() == OpKind::NearBranch64 {
-                    self.add_relative_translation(instruction, &mut translations, assume_near, &mut prev_obfuscated_lea).unwrap();
-                } 
-                else if instruction.mnemonic() == iced_x86::Mnemonic::Jmp {
-                    self.add_switch_translation(instruction, &mut translations).unwrap();
-                }
-                else {
-                    translations.push(Translation::Default(DefaultTranslation::new(instruction)));
+                if self.is_rel_instruction(&instruction)
+                    || instruction.op0_kind() == OpKind::NearBranch64
+                {
+                    self.add_relative_translation(
+                        instruction,
+                        &mut translations,
+                        assume_near,
+                        &mut prev_obfuscated_lea,
+                    )
+                    .unwrap();
+                } else if instruction.mnemonic() == iced_x86::Mnemonic::Jmp {
+                    self.add_switch_translation(instruction, &mut translations)
+                        .unwrap();
+                } else {
+                    self.add_default_translation(instruction, &mut translations)
+                        .unwrap();
                 }
 
                 //prev_instr.rotate_right(1);
