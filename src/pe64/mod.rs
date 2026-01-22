@@ -779,12 +779,16 @@ impl PE64 {
                     || op_kind == OpKind::NearBranch64
                 {
                     break;
+                    // if next_inst.condition_code() != ConditionCode::None {
+                    //     decoder.set_ip(next_inst.near_branch_target());
+                    // }
+
+                    // continue;
                 }
 
                 if next_inst.mnemonic() == Mnemonic::Call {
-                    decoder.set_ip(next_inst.near_branch_target());
-
-                    continue;
+                    preserve_flags = false;
+                    break;
                 }
 
                 cummulative_flags_modified |= next_inst.rflags_modified();
@@ -795,8 +799,6 @@ impl PE64 {
                     break;
                 }
             }
-
-            preserve_flags = true;
 
             if self.mov && mnemonic == Mnemonic::Mov {
                 let mut a = CodeAssembler::new(64).unwrap();
