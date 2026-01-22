@@ -787,7 +787,7 @@ impl PE64 {
                 }
 
                 if next_inst.mnemonic() == Mnemonic::Call {
-                    preserve_flags = false;
+                    // preserve_flags = false;
                     break;
                 }
 
