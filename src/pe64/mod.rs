@@ -315,7 +315,13 @@ impl PE64 {
             let op_kind1 = inst.op_kind(1);
             let reg = inst.op0_register();
 
-            if reg.is_gpr() {
+            if reg.is_gpr()
+                && (op_kind1 == OpKind::Immediate8
+                    || op_kind1 == OpKind::Immediate16
+                    || op_kind1 == OpKind::Immediate32
+                    || op_kind1 == OpKind::Immediate64)
+            {
+                // println!("{inst}");
                 was_obfuscated = true;
 
                 // let rounds = rng().random_range(1..=1);
@@ -556,6 +562,43 @@ impl PE64 {
                         }
                     }
                 }
+            } else if op_kind1 == OpKind::Memory {
+                let mut a = CodeAssembler::new(64).unwrap();
+                let mut instr = Instruction::with2(
+                    Code::Lea_r64_m,
+                    reg,
+                    MemoryOperand::new(
+                        inst.memory_base(),
+                        inst.memory_index(),
+                        inst.memory_index_scale(),
+                        inst.memory_displacement64() as i64,
+                        inst.memory_displ_size(),
+                        inst.is_broadcast(),
+                        inst.segment_prefix(),
+                    ),
+                )
+                .unwrap();
+                let mut instructions = Self::obf_lea(&mut a, &mut instr, preserve_flags);
+                instructions.push(
+                    Instruction::with2(
+                        Code::Mov_r64_rm64,
+                        reg,
+                        MemoryOperand::new(reg, Register::None, 1, 0, 0, false, Register::None),
+                    )
+                    .unwrap(),
+                );
+                // let mut tmp_a = CodeAssembler::new(64).unwrap();
+                // // Self::obf_mov(&mut tmp_a, inst, preserve_flags)
+                // println!();
+                // println!(
+                //     "{inst} {:?} {:?} {:?}",
+                //     inst.op1_kind(),
+                //     inst.op0_register(),
+                //     inst.memory_base()
+                // );
+                // for instruction in instructions {
+                //     println!("{instruction}");
+                // }
             }
         }
 
@@ -745,6 +788,53 @@ impl PE64 {
         }
     }
 
+    fn obf_lea(
+        a: &mut CodeAssembler,
+        instruction: &mut Instruction,
+        preserve_flags: bool,
+    ) -> Vec<Instruction> {
+        let mut new_instructions = Vec::new();
+        let offset32 = rng().random_range((i32::MIN / 2)..=(i32::MAX / 2));
+        let disp = instruction.memory_displacement64();
+        let new_disp = disp.wrapping_add_signed(offset32 as i64);
+
+        instruction.set_memory_displ_size(8);
+        instruction.set_memory_displacement64(new_disp);
+
+        // instruction
+        new_instructions.push(*instruction);
+
+        if preserve_flags {
+            let i = Instruction::with(Code::Pushfq);
+            new_instructions.push(i);
+        }
+
+        if (new_disp as i32) < 0 {
+            let i = Instruction::with2(
+                Code::Add_rm64_imm32,
+                instruction.op0_register().full_register(),
+                -offset32,
+            )
+            .unwrap();
+            new_instructions.push(i);
+        } else {
+            let i = Instruction::with2(
+                Code::Sub_rm64_imm32,
+                instruction.op0_register().full_register(),
+                offset32,
+            )
+            .unwrap();
+            new_instructions.push(i);
+        }
+
+        if preserve_flags {
+            let i = Instruction::with(Code::Popfq);
+            new_instructions.push(i);
+        }
+
+        new_instructions
+    }
+
     fn add_default_translation(
         &self,
         decoder: &mut Decoder,
@@ -787,7 +877,7 @@ impl PE64 {
                 }
 
                 if next_inst.mnemonic() == Mnemonic::Call {
-                    // preserve_flags = false;
+                    preserve_flags = false;
                     break;
                 }
 
@@ -799,6 +889,8 @@ impl PE64 {
                     break;
                 }
             }
+
+            preserve_flags = true;
 
             if self.mov && mnemonic == Mnemonic::Mov {
                 let mut a = CodeAssembler::new(64).unwrap();
@@ -862,48 +954,20 @@ impl PE64 {
             //     }
             // }
             else if self.lea && mnemonic == Mnemonic::Lea {
-                let offset32 = rng().random_range((i32::MIN / 2)..=(i32::MAX / 2));
-                let disp = instruction.memory_displacement64();
-                let new_disp = disp.wrapping_add_signed(offset32 as i64);
+                let mut a = CodeAssembler::new(64).unwrap();
+                let mut instr = instruction;
+                let instructions = Self::obf_lea(&mut a, &mut instr, preserve_flags);
 
-                instruction.set_memory_displ_size(8);
-                instruction.set_memory_displacement64(new_disp);
-
-                // instruction
-                translations.push(Translation::Default(DefaultTranslation::new(instruction)));
-
-                if preserve_flags {
-                    let mut i = Instruction::with(Code::Pushfq);
-                    i.set_ip(instruction.ip());
-                    translations.push(Translation::Default(DefaultTranslation::new(i)));
-                }
-
-                if (new_disp as i32) < 0 {
-                    let mut i = Instruction::with2(
-                        Code::Add_rm64_imm32,
-                        instruction.op0_register().full_register(),
-                        -offset32,
-                    )?;
-                    i.set_ip(instruction.ip());
-                    // println!("{i}");
-
-                    translations.push(Translation::Default(DefaultTranslation::new(i)));
+                if instructions.is_empty() {
+                    translations.push(Translation::Default(DefaultTranslation::new(instruction)));
                 } else {
-                    let mut i = Instruction::with2(
-                        Code::Sub_rm64_imm32,
-                        instruction.op0_register().full_register(),
-                        offset32,
-                    )?;
-                    i.set_ip(instruction.ip());
-                    // println!("{i}");
+                    for mut new_instruction in instructions {
+                        new_instruction.set_ip(instruction.ip());
 
-                    translations.push(Translation::Default(DefaultTranslation::new(i)));
-                }
-
-                if preserve_flags {
-                    let mut i = Instruction::with(Code::Popfq);
-                    i.set_ip(instruction.ip());
-                    translations.push(Translation::Default(DefaultTranslation::new(i)));
+                        translations.push(Translation::Default(DefaultTranslation::new(
+                            new_instruction,
+                        )));
+                    }
                 }
             } else {
                 translations.push(Translation::Default(DefaultTranslation::new(instruction)));
