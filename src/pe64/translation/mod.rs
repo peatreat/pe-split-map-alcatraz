@@ -8,7 +8,7 @@ pub mod relative;
 pub use control::ControlTranslation;
 use iced_x86::{Decoder, Encoder, Instruction};
 pub use jcc::JCCTranslation;
-use rand::RngCore;
+use rand::{Rng, RngCore, rng};
 pub use relative::RelativeTranslation;
 
 use crate::{
@@ -257,7 +257,7 @@ impl DefaultTranslation {
 
     pub fn buffer(&self) -> Result<Vec<u8>, iced_x86::IcedError> {
         let mut encoder = Encoder::new(64);
-        //println!("{}", &self.instruction);
+        // println!("{}", &self.instruction);
         encoder.encode(&self.instruction, self.instruction.ip())?;
         Ok(encoder.take_buffer())
     }
@@ -306,7 +306,7 @@ impl EmbedTranslation {
             let mut embed = vec![
                 0xEB,
                 0x01 + bytes_remaining,
-                0xB8 + (ip % (0xBF - 0xB8)) as u8,
+                rng().random_range(0xB8..=0xBF),
                 0x00,
                 0x00,
                 0x00,
@@ -325,7 +325,7 @@ impl EmbedTranslation {
                 0xEB,
                 0x02 + bytes_remaining,
                 0x48,
-                0xB8 + (ip % (0xBF - 0xB8)) as u8,
+                rng().random_range(0xB8..=0xBF),
                 0x00,
                 0x00,
                 0x00,

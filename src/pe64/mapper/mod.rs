@@ -217,6 +217,10 @@ impl Mapper {
                         &dll_import.path,
                         false,
                         false,
+                        false,
+                        false,
+                        false,
+                        false,
                     )?)?
                     .ok_or(PSMError::ImportHasNoExports(dll_name.to_owned()))?;
 
