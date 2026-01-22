@@ -796,6 +796,8 @@ impl PE64 {
                 }
             }
 
+            preserve_flags = true;
+
             if self.mov && mnemonic == Mnemonic::Mov {
                 let mut a = CodeAssembler::new(64).unwrap();
                 let instructions = Self::obf_mov(&mut a, &mut instruction, preserve_flags);
