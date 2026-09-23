@@ -15,6 +15,62 @@ pub struct Symbol {
     pub should_ignore: bool,
 }
 
+/// Fallback distance (in bytes) between the instructions referencing two
+/// symbols when unwind info is not available for them.
+const NEAR_REFERENCE_DISTANCE: usize = 0x100;
+
+fn function_index(function_ranges: &[(usize, usize)], rva: usize) -> Option<usize> {
+    function_ranges
+        .binary_search_by(|&(start, end)| {
+            if rva < start {
+                std::cmp::Ordering::Greater
+            } else if rva >= end {
+                std::cmp::Ordering::Less
+            } else {
+                std::cmp::Ordering::Equal
+            }
+        })
+        .ok()
+}
+
+/// Returns true when any of the next symbol's referencing instructions shares a
+/// function with the references already merged into the current block, or, when
+/// unwind info does not cover them, is closer than [`NEAR_REFERENCE_DISTANCE`].
+///
+/// Generated code can compute a slice's length as `end - start` where `start`
+/// and `end` are two separately relocated symbols (`lea start` / `lea start+N`).
+/// That arithmetic only exists inside a single function, so symbols referenced
+/// from the same function have to stay in the same mapped block for the offset
+/// to remain valid.
+fn next_refs_are_near(
+    merged_refs: &std::collections::BTreeSet<usize>,
+    merged_functions: &std::collections::BTreeSet<usize>,
+    next_refs: &[usize],
+    function_ranges: &[(usize, usize)],
+) -> bool {
+    for &ip in next_refs {
+        if let Some(function) = function_index(function_ranges, ip) {
+            if merged_functions.contains(&function) {
+                return true;
+            }
+        }
+
+        if let Some(&below) = merged_refs.range(..=ip).next_back() {
+            if below.abs_diff(ip) <= NEAR_REFERENCE_DISTANCE {
+                return true;
+            }
+        }
+
+        if let Some(&above) = merged_refs.range(ip..).next() {
+            if above.abs_diff(ip) <= NEAR_REFERENCE_DISTANCE {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
 pub fn get_symbol(symbol: &[(usize, Symbol)], rva: usize) -> Option<&(usize, Symbol)> {
     symbol.iter().find(|s| (s.0..(s.0+s.1.max_operation_size as usize)).contains(&rva))
 }
@@ -53,6 +109,9 @@ impl Symbol {
 
 pub fn split_symbols(pe: &PE64, obfuscated: bool) -> Result<Vec<(usize, Symbol)>, PSMError> {
     let mut symbols: HashMap<usize, Symbol> = HashMap::new();
+    // .text RVAs of the instructions that reference each symbol. Needed to keep
+    // symbols that are subtracted from each other in the same mapped block.
+    let mut symbol_refs: HashMap<usize, Vec<usize>> = HashMap::new();
 
     pe.iter_find_section(|section| {
         println!("section: {}, raw size: {:p}, virt size: {:p}", section.name, section._raw.len() as *const usize, section.virtual_size as *const usize);
@@ -88,6 +147,11 @@ pub fn split_symbols(pe: &PE64, obfuscated: bool) -> Result<Vec<(usize, Symbol)>
                                     false,
                                     false,
                                 );
+
+                                symbol_refs
+                                    .entry(operand_rva as usize)
+                                    .or_default()
+                                    .push(instruction.ip() as usize);
                             }
                         }
 
@@ -122,6 +186,11 @@ pub fn split_symbols(pe: &PE64, obfuscated: bool) -> Result<Vec<(usize, Symbol)>
                             false,
                             false,
                         );
+
+                        symbol_refs
+                            .entry(instruction.ip_rel_memory_address() as usize)
+                            .or_default()
+                            .push(instruction.ip() as usize);
                     }
                     //println!("instruction: {} | rva: {:p} | symbol rva: {:p} | size: {:?}", instruction, (section.virtual_address as u64 + instruction.ip()) as *const usize, (section.virtual_address as u64 + instruction.ip_rel_memory_address()) as *const usize, instruction.memory_size().size());
                 }
@@ -290,6 +359,11 @@ pub fn split_symbols(pe: &PE64, obfuscated: bool) -> Result<Vec<(usize, Symbol)>
     let mut sorted_symbols = symbols.iter().map(|(key, value)| (*key, *value)).collect::<Vec<_>>();
     sorted_symbols.sort_by_key(| (k, _) | *k);
 
+    let mut sorted_refs = sorted_symbols
+        .iter()
+        .map(|(rva, _)| symbol_refs.remove(rva).unwrap_or_default())
+        .collect::<Vec<_>>();
+
     // update ptr reference symbols to have size = next_symbol_rva - current_symbol_rva if larger than current size, but clamp to section size
     for i in 0..sorted_symbols.len() - 1 {
         let next_rva = sorted_symbols[i + 1].0;
@@ -323,8 +397,11 @@ pub fn split_symbols(pe: &PE64, obfuscated: bool) -> Result<Vec<(usize, Symbol)>
     // merge overlapping symbols
     // if cur rva is between last rva and last rva + size, update last size to max(last size, cur rva + cur size - last rva), else add new symbol to merged list
     let mut merged_symbols: Vec<(usize, Symbol)> = Vec::new();
+    let mut merged_refs: Vec<Vec<usize>> = Vec::new();
 
-    for (rva, symbol) in sorted_symbols {
+    for (index, (rva, symbol)) in sorted_symbols.into_iter().enumerate() {
+        let refs = std::mem::take(&mut sorted_refs[index]);
+
         if let Some((last_rva, last_symbol)) = merged_symbols.last_mut() {
             if rva >= *last_rva && rva < (*last_rva + last_symbol.max_operation_size as usize) {
                 // overlapping, update size
@@ -334,46 +411,83 @@ pub fn split_symbols(pe: &PE64, obfuscated: bool) -> Result<Vec<(usize, Symbol)>
                 }
 
                 last_symbol.is_ptr_reference |= symbol.is_ptr_reference;
+                merged_refs.last_mut().unwrap().extend(refs);
             } else {
                 // non-overlapping, add new symbol
                 merged_symbols.push((rva, symbol));
+                merged_refs.push(refs);
             }
         } else {
             // first symbol, add directly
             merged_symbols.push((rva, symbol));
+            merged_refs.push(refs);
         }
     }
 
-    // for all contiguous symbols after a ptr ref symbol, merge the ptr ref symbol to cover all contiguous symbols that are not ptr ref symbols
+    // code ranges of the final functions, used to tell whether two symbols are
+    // referenced from the same function
+    let function_ranges = ExceptionDirectory::get_function_ranges(&pe);
+
+    // for all contiguous symbols after a ptr ref symbol, merge the ptr ref symbol
+    // to cover contiguous symbols that are not ptr ref symbols, and also ptr ref
+    // symbols whose referencing instructions live in the same function (their
+    // offsets can be observed by `end - start` style address arithmetic)
     let mut final_symbols: Vec<(usize, Symbol)> = Vec::new();
     let mut i = 0;
     while i < merged_symbols.len() {
         let (rva, symbol) = merged_symbols[i];
 
         if symbol.is_ptr_reference {
+            let mut accumulated_refs: std::collections::BTreeSet<usize> =
+                std::mem::take(&mut merged_refs[i]).into_iter().collect();
+            let mut accumulated_functions: std::collections::BTreeSet<usize> = accumulated_refs
+                .iter()
+                .filter_map(|&ip| function_index(&function_ranges, ip))
+                .collect();
             let mut combined_size = symbol.max_operation_size as usize;
             let mut j = i + 1;
             let mut should_ignore = symbol.should_ignore;
             let symbol_section = pe.iter_find_section(|s| s.contains_rva(rva)).unwrap();
+            let section_end_rva = symbol_section.virtual_address + symbol_section.virtual_size;
 
             while j < merged_symbols.len() {
                 let (next_rva, next_symbol) = merged_symbols[j];
                 let next_sym_section = pe.iter_find_section(|s| s.contains_rva(next_rva)).unwrap();
 
-                if !next_symbol.is_ptr_reference && !next_symbol.is_directory_symbol && symbol_section.virtual_address == next_sym_section.virtual_address /* && next_rva == rva + combined_size*/ {
+                let mergeable = !next_symbol.is_directory_symbol
+                    && symbol_section.virtual_address == next_sym_section.virtual_address
+                    && (!next_symbol.is_ptr_reference
+                        || next_refs_are_near(
+                            &accumulated_refs,
+                            &accumulated_functions,
+                            &merged_refs[j],
+                            &function_ranges,
+                        ));
+
+                if mergeable {
+                    if next_symbol.is_ptr_reference {
+                        println!(
+                            "merging near pointer references: {:p} + {:p}",
+                            rva as *const usize, next_rva as *const usize
+                        );
+                    }
+
                     //combined_size = next_symbol.max_operation_size as usize;
                     if (!next_symbol.should_ignore) {
                         should_ignore = false;
                     }
 
+                    for &ip in &merged_refs[j] {
+                        accumulated_refs.insert(ip);
+
+                        if let Some(function) = function_index(&function_ranges, ip) {
+                            accumulated_functions.insert(function);
+                        }
+                    }
+
                     j += 1;
-                }
-                /*else if next_symbol.is_ptr_reference {
-                    combined_size += next_rva - (rva + combined_size);
-                    break;
-                }*/
-                else {
-                    combined_size = (next_rva - rva).min(symbol_section.virtual_address + symbol_section.virtual_size - rva);
+                } else {
+                    combined_size = (next_rva - rva).min(section_end_rva - rva);
                     break;
                 }
             }

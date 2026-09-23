@@ -25,6 +25,40 @@ pub struct UnwindBlock {
 }
 
 impl ExceptionDirectory {
+    /// Returns `BeginAddress..EndAddress` for every entry in the exception
+    /// directory, i.e. the code ranges of the final functions. Used to decide
+    /// whether two symbols are referenced from the same function.
+    pub fn get_function_ranges(pe64: &PE64) -> Vec<(usize, usize)> {
+        let optional_header = &pe64.nt64().OptionalHeader;
+        let exception_data_directory = &optional_header.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXCEPTION as usize];
+
+        if exception_data_directory.VirtualAddress == 0 || exception_data_directory.Size == 0 {
+            return Vec::new();
+        }
+
+        let exception_dir_rva = exception_data_directory.VirtualAddress as usize;
+        let exception_dir_size = exception_data_directory.Size as usize;
+        let number_of_entries = exception_dir_size / mem::size_of::<RUNTIME_FUNCTION>();
+
+        let mut ranges = Vec::new();
+
+        for i in 0..number_of_entries {
+            let entry: Option<&RUNTIME_FUNCTION> = pe64
+                .get_ref_from_rva(exception_dir_rva + i * mem::size_of::<RUNTIME_FUNCTION>())
+                .ok();
+
+            if let Some(entry) = entry {
+                if entry.BeginAddress != 0 && entry.EndAddress > entry.BeginAddress {
+                    ranges.push((entry.BeginAddress as usize, entry.EndAddress as usize));
+                }
+            }
+        }
+
+        ranges.sort_unstable_by_key(|&(start, _)| start);
+
+        ranges
+    }
+
     pub fn get_unwind_blocks(pe64: &PE64) -> Vec<UnwindBlock> {
         let optional_header = &pe64.nt64().OptionalHeader;
         let exception_data_directory = &optional_header.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXCEPTION as usize];
