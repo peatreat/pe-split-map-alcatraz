@@ -1254,7 +1254,24 @@ impl PE64 {
 
                 Ok(())
             }
-            _ => panic!("unsupported jmp instruction"),
+            OpKind::Memory => {
+                if instruction.memory_index() != Register::None {
+                    panic!(
+                        "unexpected jump table at {:X}: {}",
+                        instruction.ip(),
+                        instruction
+                    );
+                }
+
+                translations.push(Translation::Default(DefaultTranslation::new(instruction)));
+                Ok(())
+            }
+            op_kind => panic!(
+                "unsupported jmp instruction at {:X}: {} ({:?})",
+                instruction.ip(),
+                instruction,
+                op_kind
+            ),
         }
     }
 
