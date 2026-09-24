@@ -371,7 +371,7 @@ pub fn split_symbols(pe: &PE64, obfuscated: bool) -> Result<Vec<(usize, Symbol)>
 
         if current_symbol.is_ptr_reference {
             let symbol_section = pe.iter_find_section(|s| s.contains_rva(*current_rva)).unwrap();
-            let section_end_rva = symbol_section.virtual_address + symbol_section.virtual_size;
+            let section_end_rva = symbol_section.virtual_address + symbol_section.size();
 
             let calculated_size = next_rva.saturating_sub(*current_rva);
             let new_size = calculated_size.min(section_end_rva.saturating_sub(*current_rva));
@@ -386,7 +386,7 @@ pub fn split_symbols(pe: &PE64, obfuscated: bool) -> Result<Vec<(usize, Symbol)>
     if let Some((last_rva, last_symbol)) = sorted_symbols.last_mut() {
         if last_symbol.is_ptr_reference {
             let symbol_section = pe.iter_find_section(|s| s.contains_rva(*last_rva)).unwrap();
-            let section_end_rva = symbol_section.virtual_address + symbol_section.virtual_size;
+            let section_end_rva = symbol_section.virtual_address + symbol_section.size();
 
             let calculated_size = section_end_rva.saturating_sub(*last_rva);
 
@@ -448,7 +448,7 @@ pub fn split_symbols(pe: &PE64, obfuscated: bool) -> Result<Vec<(usize, Symbol)>
             let mut j = i + 1;
             let mut should_ignore = symbol.should_ignore;
             let symbol_section = pe.iter_find_section(|s| s.contains_rva(rva)).unwrap();
-            let section_end_rva = symbol_section.virtual_address + symbol_section.virtual_size;
+            let section_end_rva = symbol_section.virtual_address + symbol_section.size();
 
             while j < merged_symbols.len() {
                 let (next_rva, next_symbol) = merged_symbols[j];

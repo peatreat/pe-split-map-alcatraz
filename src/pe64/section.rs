@@ -7,6 +7,7 @@ pub struct Section<'a> {
     pub name: String,
     pub virtual_address: usize,
     pub virtual_size: usize,
+    pub size_of_raw_data: usize,
     pub characteristics: u32,
 }
 
@@ -15,8 +16,12 @@ impl Section<'_> {
         (self.characteristics & IMAGE_SCN_MEM_EXECUTE) != 0
     }
 
+    pub fn size(&self) -> usize {
+        self.virtual_size.max(self.size_of_raw_data)
+    }
+
     pub fn contains_rva(&self, rva: usize) -> bool {
-        rva >= self.virtual_address && rva < (self.virtual_address + self.virtual_size)
+        rva >= self.virtual_address && rva < (self.virtual_address + self.size())
     }
 }
 
@@ -35,6 +40,7 @@ impl<'a> From<(&'a [u8], &'a IMAGE_SECTION_HEADER)> for Section<'a> {
             name,
             virtual_address: header.VirtualAddress as usize,
             virtual_size: header.VirtualSize as usize,
+            size_of_raw_data: header.SizeOfRawData as usize,
             characteristics: header.Characteristics
         }
     }
