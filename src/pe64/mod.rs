@@ -205,7 +205,11 @@ impl PE64 {
                 &*(self._raw.as_ptr().add(section_offset) as *const IMAGE_SECTION_HEADER)
             };
 
-            let section = Section::from((self._raw.as_slice(), section));
+            let section = Section::from((
+                self._raw.as_slice(),
+                section,
+                self.nt64().OptionalHeader.SectionAlignment as usize,
+            ));
 
             if closure(&section) {
                 return Some(section);

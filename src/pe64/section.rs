@@ -8,6 +8,7 @@ pub struct Section<'a> {
     pub virtual_address: usize,
     pub virtual_size: usize,
     pub size_of_raw_data: usize,
+    pub section_alignment: usize,
     pub characteristics: u32,
 }
 
@@ -17,7 +18,13 @@ impl Section<'_> {
     }
 
     pub fn size(&self) -> usize {
-        self.virtual_size.max(self.size_of_raw_data)
+        let size = self.virtual_size.max(self.size_of_raw_data);
+
+        if self.section_alignment == 0 {
+            return size;
+        }
+
+        size.next_multiple_of(self.section_alignment)
     }
 
     pub fn contains_rva(&self, rva: usize) -> bool {
@@ -25,8 +32,8 @@ impl Section<'_> {
     }
 }
 
-impl<'a> From<(&'a [u8], &'a IMAGE_SECTION_HEADER)> for Section<'a> {
-    fn from((raw, header): (&[u8], &'a IMAGE_SECTION_HEADER)) -> Self {
+impl<'a> From<(&'a [u8], &'a IMAGE_SECTION_HEADER, usize)> for Section<'a> {
+    fn from((raw, header, section_alignment): (&[u8], &'a IMAGE_SECTION_HEADER, usize)) -> Self {
         let section_raw = unsafe { slice::from_raw_parts::<'a, u8>(raw.as_ptr().add(header.PointerToRawData as usize) as *const u8, header.SizeOfRawData as usize) };
         
         let name = header.Name
@@ -41,6 +48,7 @@ impl<'a> From<(&'a [u8], &'a IMAGE_SECTION_HEADER)> for Section<'a> {
             virtual_address: header.VirtualAddress as usize,
             virtual_size: header.VirtualSize as usize,
             size_of_raw_data: header.SizeOfRawData as usize,
+            section_alignment,
             characteristics: header.Characteristics
         }
     }
