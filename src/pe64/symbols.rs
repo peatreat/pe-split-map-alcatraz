@@ -454,6 +454,21 @@ pub fn split_symbols(pe: &PE64, obfuscated: bool) -> Result<Vec<(usize, Symbol)>
                 let (next_rva, next_symbol) = merged_symbols[j];
                 let next_sym_section = pe.iter_find_section(|s| s.contains_rva(next_rva)).unwrap();
 
+                // A relocation/import directory symbol that starts exactly where
+                // the object ends describes fields inside that object (table
+                // entries, vtable slots, ...). The code takes the object's
+                // address once (`lea`) and then indexes it at fixed offsets, so
+                // splitting the object from its interior makes every offset
+                // past the first field read unrelated memory.
+                if next_symbol.is_directory_symbol
+                    && symbol_section.virtual_address == next_sym_section.virtual_address
+                    && next_rva == rva + combined_size
+                {
+                    combined_size = next_rva + next_symbol.max_operation_size as usize - rva;
+                    j += 1;
+                    continue;
+                }
+
                 let mergeable = !next_symbol.is_directory_symbol
                     && symbol_section.virtual_address == next_sym_section.virtual_address
                     && (!next_symbol.is_ptr_reference
